@@ -1,0 +1,164 @@
+clear
+
+%% read data from file
+filename = '../../data/pied_piper/dungeness_2005-2020_combine_ma_msd.csv';
+salmon_data=readtable(filename);
+salmon_data_2005 = salmon_data(salmon_data.year==2005,:);
+salmon_data_2006 = salmon_data(salmon_data.year==2006,:);
+salmon_data_2012 = salmon_data(salmon_data.year==2012,:);
+%% select species to focus on (we chose 4, can add more)
+%fish_per_hour=[table2array(salmon_data_2006(:,5:6)),table2array(salmon_data_2006(:,9:10)),table2array(salmon_data_2006(:,13:14)),table2array(salmon_data_2006(:,17:18)),table2array(salmon_data_2006(:,22)),table2array(salmon_data_2006(:,25)),table2array(salmon_data_2006(:,27:28))]';%time-series data for 2006
+fish_per_hour=[table2array(salmon_data(1:147,13:14))]';%,table2array(salmon_data_2012(:,9:10))];
+
+
+%We chose all chinook0_hatch, chinook0_wild, chinook1_hatch, chinook1_wild
+%% Building Reservoir Computer model of Time-series
+
+%% Random seed for reproducibility
+rng(1,'twister') %can change it to rng(shuffle) for an ensemble of results with random reservoirs
+
+%% Construction of the reservoir, specification of reservoir parameters
+resparams=struct();
+num_inputs = size(fish_per_hour,1);
+resparams.radius = 0.9; % spectral radius of reservoir
+resparams.degree = 3; % average connection degree of reservoir
+approx_res_size = 3000; % reservoir size (#nodes)
+resparams.N = floor(approx_res_size/num_inputs)*num_inputs; % actual reservoir size divisible by number of inputs
+resparams.sigma = 0.1; % input weight scaling
+resparams.train_length = size(fish_per_hour,1)-50; % number of time points used to train - I am changing to size(fish, 1) - 50
+resparams.num_inputs = num_inputs; 
+resparams.beta = 10^(-4); %regularization parameter
+resparams.leakage=1; %leakage rate
+%% Training the reservoir 
+[~, w_out, A, win,r] = train_reservoir(resparams, fish_per_hour(:, 1:resparams.train_length),fish_per_hour(:, 2:resparams.train_length+1));%Training
+%This builds a trained reservoir that does one-step prediction of input
+%time-series, i.e., it fits species_per_hour(:, 2:resparams.train_length+1) to species_per_hour(:, 1:resparams.train_length)
+
+% w_out = reservoir-to-prediction coupling matrix
+% win = input-to-reservoir coupling matrix
+% A = Reservoir connectivity matrix
+% r= Reservoir state vector at different times
+
+%% Plot to check fitting to the data
+figure
+%species_names=["chinook 0 hatchery", "chinook 0 wild","chinook 1 hatchery", "chinook 1 wild","coho1 1 hatchery", "coho1 1 wild","steelheadsmolt hatchery", "steelheadsmolt wild", "pink wild", "chum wild", "flow", "temp"];
+species_names=["chinook 0 hatchery", "chinook 0 wild","chinook 1 hatchery", "chinook 1 wild"];
+fish_per_hour_fitted=w_out*r;%output from the reservoir computer
+for ispecies=1:size(species_names,2)
+    subplot(1,4,ispecies)
+    plot(fish_per_hour(ispecies,2:resparams.train_length+1),'-')
+    hold on
+    plot(fish_per_hour_fitted(ispecies,1:resparams.train_length),'--')
+    hold off
+    title(species_names(ispecies))
+    xlabel('Time step')
+    ylabel('Flow per hour')
+    legend({'Data','Fitted'},'location','northwest')
+    set(gca,'FontSize',15)
+end
+
+
+%% Inferring the connection strength J, please refer to our paper for the equations used
+J =zeros(size(win,2),size(win,2),resparams.train_length);
+%3D array to store the N*N*T Jacobian elements (N=#species, T=#training data points)
+%J(i,j,t) gives interaction strength from species j to species i at time-step t
+
+B=A+win*w_out;
+for it=1:resparams.train_length %time loop for calculation of J
+
+%track progress if you wish
+%     if mod(it,100)==0
+%        disp(it)
+%     end
+    
+    x=r(:,it);
+    A2=B*x;
+    mat1=zeros(size(w_out));
+    for i1=1:resparams.N
+        mat1(:,i1)=w_out(:,i1)*(sech(A2(i1)))^2;
+    end
+    
+h=(mat1*(win+A*pinv(w_out)));
+
+J(:,:,it)=h(:,:);
+end
+%% Plot interactions over time
+figure
+%we pick some specific connection strengths to visualize
+%pairs=["chinook0 wild to hatchery","chinook0 hatchery to wild","coho1 hatchery to chinook0 wild","coho1 wild to chinook0 hatchery"];
+pairs=["chinook0 hatchery","chinook0 wild","chinook1 hatchery","chinook1 wild"];
+%pairs=["chinook0 hatchery","chinook1 hatchery","chinook1 wild","coho1 hatchery","coho1 wild", "steelhead hatchery", "steelhead wild", "pink", "chum", "flow", "chinook0 wild"];
+% p(1,:)=J(12,1,:);%chinook0 hatchery to chinook0 wild
+% p(2,:)=J(12,3,:);%chinook1 hatchery to chinook0 wild
+% p(3,:)=J(12,4,:);%chinook1 wild to chinook0 wild
+% p(4,:)=J(12,5,:);%coho1 hatchery to chinook0 wild
+% p(5,:)=J(12,6,:);%coho1 wild to chinook0 wild
+% p(6,:)=J(12,7,:);%steelhead hatchery to chinook0 wild
+% p(7,:)=J(12,8,:);%steelhead wild to chinook0 wild
+% p(8,:)=J(12,9,:);%pinkwild to chinook0 wild
+% p(9,:)=J(12,10,:);%chum wild to chinook0 wild
+% p(10,:)=J(12,11,:);%flow wild to chinook0 wild
+% p(11,:)=J(12,2,:);%chinook0 to temp - this is all to temp
+p(1,:)=J(2,1,:);%chinook 0 hatchery  to chinook0 wild
+p(2,:)=J(2,2,:);%chinook 0 wild to chinook0 wild
+p(3,:)=J(2,3,:);%chinook1 hatchery to chinook0 wild
+p(4,:)=J(2,4,:);%chinook1 wild to chinook0 wild
+
+for iline=1:size(p,1)
+subplot(1,4,iline)
+plot(p(iline,:),'-','LineWidth',2)
+xlabel('Time step')
+ylabel('Interaction Strength')
+set(gca,'FontSize',15)
+title(pairs(iline))
+end
+sgtitle('Time-dependent interaction strengths - temp')
+
+
+
+
+%% Functions
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+function [x, wout, A, win,states] = train_reservoir(resparams, data1,data2)
+
+A = generate_reservoir(resparams.N, resparams.radius, resparams.degree);
+q = resparams.N/resparams.num_inputs;
+win = zeros(resparams.N, resparams.num_inputs);
+for i=1:resparams.num_inputs
+    ip = resparams.sigma*(-1 + 2*rand(q,1));
+    win((i-1)*q+1:i*q,i) = ip;
+end
+states = reservoir_layer(A, win, data1, resparams);
+wout = train(resparams, states, data2(:,1:resparams.train_length));
+x = states(:,end);
+end
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+function A = generate_reservoir(size, radius, degree)
+sparsity = degree/size;
+while 1
+A = sprand(size, size, sparsity);
+e = max(abs(eigs(A)));
+
+if (isnan(e)==0)%Avoid NaN in the largest eigenvalue, in case convergence issues arise
+    break;
+end
+
+end
+A = (A./e).*radius;
+end
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+function states = reservoir_layer(A, win, input, resparams)
+
+states = zeros(resparams.N, resparams.train_length);
+for i = 1:resparams.train_length-1
+    states(:,i+1) = (1-resparams.leakage)*states(:,i)+resparams.leakage*tanh(A*states(:,i) + win*input(:,i));
+end
+end
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+function w_out = train(params, states, data)
+beta = params.beta;
+idenmat = beta*speye(params.N);
+w_out = data*transpose(states)*pinv(states*transpose(states)+idenmat);
+end
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%

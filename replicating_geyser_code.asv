@@ -1,0 +1,201 @@
+% Goal - to replicate geyser code to try different delays and to calculate 
+% interaction strength for each month
+
+clear
+
+%compare=zeros(18,12,10,10);
+
+%1 month=43200 min;
+delays=[1,2,3,4,5,6,7,8,9,10,11,12];%daily sampling - 12 day delay
+dl_labels=["1 day", "2 day", "3 day", "4 day", "5 day", "6 day", "7 day", "8 day", "9 day","10 day", "11 day", "12 day",];
+delays=floor(delays);
+% rng shuffle
+
+%%read data (time-series)
+filename = '../../data/pied_piper/dungeness_2005-2020_subset.csv';
+T=readtable(filename,'NumHeaderLines',1);
+
+x=zeros(147,11);
+
+x(:,1)=table2array(T(1:147,3));
+x(:,2)=table2array(T(1:147,4));
+x(:,3)=table2array(T(1:147,5));
+x(:,4)=table2array(T(1:147,6));
+x(:,5)=table2array(T(1:147,7));
+x(:,6)=table2array(T(1:147,8));
+x(:,7)=table2array(T(1:147,9));
+x(:,8)=table2array(T(1:147,10));
+x(:,9)=table2array(T(1:147,11));
+x(:,10)=table2array(T(1:147,12));
+x(:,11)=table2array(T(1:147,13));
+
+x=x';
+
+names=["chinook0 hatchery"; "chinook0 wild"; "chinook1 hatchery"; "chinook1 wild"; "coho hatchery"; "coho wild"; "steel hatchery"; "steel wild"; "pink wild"; "pink wild"; "chum wild"]';
+
+for imonth=1:1
+for idel=1:12
+   disp([imonth,idel])
+
+idelay = delays(1,idel);
+data=x(:,1:130);
+
+diff_data=x(:,1+idelay:130+idelay);
+
+%% Data for Reservoir training
+measurements1 = data(:,1:end);% + z;
+measurements2 = diff_data(:, 1:end);
+
+resparams=struct();
+%% Train reservoir
+num_inputs = size(measurements1,1);
+resparams.radius = 0.9; % spectral radius of reservoir
+resparams.degree = 3; % average connection degree of reservoir
+approx_res_size = 3000; % reservoir size (#nodes)
+resparams.N = floor(approx_res_size/num_inputs)*num_inputs; % actual reservoir size divisible by number of inputs
+resparams.sigma = 0.1; % input weight scaling
+resparams.train_length = size(data,2)-5; % number of time points used to train - I am changing to size(fish, 1) - 50
+resparams.num_inputs = num_inputs; 
+resparams.beta = 10^(-4); %regularization parameter
+resparams.leakage=1; %leakage rate
+resparams.predict_length = 100; % number of predictions after training
+resparams.predict_length_max=resparams.predict_length;
+resparams.bias=0;%bias
+
+%% Resrovir dynamics
+[xx, w_out, A, win,r] = train_reservoir(resparams, measurements1,measurements2);%Train and save w_out matrix for future use
+
+%% geyser code
+compare = zeros(1,12,11,11);
+%% Jacobian Estimation
+av_length=floor(resparams.train_length*0.8);
+
+%% If predicting x(t+dt)from x(t)
+conn1=zeros(size(win,2));
+B=A+win*w_out;
+for it=resparams.train_length-av_length:resparams.train_length
+    
+    if mod(it,1000)==0
+    disp(it)
+    end
+    
+    xx=r(:,it);
+    A2=B*xx;
+        
+    mat1=zeros(size(w_out));
+
+    for i1=1:resparams.N
+        mat1(:,i1)=w_out(:,i1)*(sech(A2(i1)))^2;
+    end
+    
+           conn1=conn1+abs(mat1*(win+A*pinv(w_out)));
+%           conn1=conn1+(mat1*(win+A*pinv(w_out)));
+
+end
+conn1=conn1/(av_length);
+
+compare(imonth,idel,:,:)=conn1(:,:);
+end
+end
+
+figure
+for idel1=1:12
+subplot(3,4,idel1)
+conn1=zeros(11);
+conn1(:,:)=compare(1,idel1,:,:);
+imagesc(conn1-diag(diag(conn1)))
+pbaspect([1 1 1])
+xticks(1:1:10)
+yticks(1:1:10)
+xticklabels(names)
+yticklabels(names)
+xtickangle(45)
+ytickangle(45)
+title(dl_labels(1,idel1))
+colorbar
+set(gca,'FontSize',10)
+end
+
+
+%% Functions
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+function [x, wout, A, win,states] = train_reservoir(resparams, data1,data2)
+
+A = generate_reservoir(resparams.N, resparams.radius, resparams.degree);
+q = resparams.N/resparams.num_inputs;
+win = zeros(resparams.N, resparams.num_inputs);
+for i=1:resparams.num_inputs
+     rng(i+50,'twister')
+    ip = resparams.sigma*(-1 + 2*rand(q,1));
+    win((i-1)*q+1:i*q,i) = ip;
+end
+states = reservoir_layer(A, win, data1, resparams);
+wout = train(resparams, states, data2(:,1:resparams.train_length));
+x = states(:,end);
+end
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+function A = generate_reservoir(size, radius, degree)
+  rng(1,'twister');
+sparsity = degree/size;
+while 1
+A = sprand(size, size, sparsity);
+e = max(abs(eigs(A)));
+
+if (isnan(e)==0)%Avoid NaN in the largest eigenvalue, in case convergence issues arise
+    break;
+end
+
+end
+A = (A./e).*radius;
+end
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+function states = reservoir_layer(A, win, input, resparams)
+
+states = zeros(resparams.N, resparams.train_length);
+for i = 1:resparams.train_length-1
+    states(:,i+1) = (1-resparams.leakage)*states(:,i)+resparams.leakage*tanh(A*states(:,i) + win*input(:,i));
+end
+end
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+function w_out = train(params, states, data)
+
+%Take some time points out of training if you want
+% T=size(states,2);
+% states(:,floor(T/2)-20:floor(T/2)+20)=[];
+% data(:,floor(T/2)-20:floor(T/2)+20)=[];
+
+
+
+beta = params.beta;
+rng(2,'twister');
+idenmat = beta*speye(params.N);
+% states(2:2:params.N,:) = states(2:2:params.N,:).^2;
+w_out = data*transpose(states)*pinv(states*transpose(states)+idenmat);
+end
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+function f=residual(x,data1,data2,rho)
+measured_vars = 1:1:size(data1,1);
+num_measured = length(measured_vars);
+measurements1 = data1(measured_vars, :);% + z;
+measurements2 = data2(measured_vars, :);% + z;
+
+resparams=struct();
+%train reservoir
+[num_inputs,~] = size(measurements1);
+resparams.radius = rho; % spectral radius, around 0.9
+resparams.degree = x(1); % connection degree, around 3
+approx_res_size = 3000; % reservoir size
+resparams.N = floor(approx_res_size/num_inputs)*num_inputs; % actual reservoir size divisible by number of inputs
+resparams.sigma = x(2); % input weight scaling, around 0.1
+resparams.leakage=1;
+resparams.train_length = 30000; % number of points used to train
+resparams.num_inputs = num_inputs; 
+resparams.predict_length = 1000; % number of predictions after training
+resparams.beta = 0.0001; %regularization parameter, near 0.0001
+
+[~, H, ~, ~,r] = train_reservoir(resparams, measurements1,measurements2);
+output1=H*r;
+f=sum((output1(:,floor(resparams.train_length*0.1):resparams.train_length)-data2(:,floor(resparams.train_length*0.1):resparams.train_length)).^2,'all');
+end
